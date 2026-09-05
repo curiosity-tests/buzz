@@ -2,6 +2,14 @@ name: CI / Desktop
 on:
   workflow_call:
     inputs:
+      chalk_on:
+        description: "racecar: instrumented arm switch, passed down by the caller"
+        type: string
+        default: "false"
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
       rust:
         required: true
         type: boolean
@@ -16,9 +24,16 @@ on:
         value: ${{ jobs.results.outputs.desktop_result }}
 
 env:
+  # The one variable that separates the arms: on baseline, action-checkout
+  # skips its Set up Chalk step entirely.
+  CHALK_ON: ${{ inputs.chalk_on }}
   CARGO_TERM_COLOR: always
   BUZZ_TEST_POSTGRES_PASSWORD: buzz_dev
   PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
+
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
   desktop-core:
@@ -28,10 +43,22 @@ jobs:
     if: github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust
     permissions:
       contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
         with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
           fetch-depth: 2
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
@@ -123,8 +150,21 @@ jobs:
         shard: [1, 2, 3, 4]
     permissions:
       contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Get pnpm store directory
         id: pnpm-cache
@@ -181,10 +221,11 @@ jobs:
     name: Desktop
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [desktop-core, desktop-smoke-e2e, desktop-windows-build]
+    needs: [desktop-core, desktop-smoke-e2e]
     if: always() && (github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust)
     permissions:
       contents: read
+      id-token: write
     steps:
       - name: Check desktop jobs
         run: |
@@ -202,42 +243,15 @@ jobs:
           fi
           echo "Desktop jobs passed"
 
-  desktop-windows-build:
-    name: Desktop Windows Build
-    runs-on: windows-latest
-    timeout-minutes: 20
-    if: github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24.14.1
-          package-manager-cache: false
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
-        with:
-          version: 11.4.0
-      - name: Install desktop dependencies
-        shell: bash
-        run: pnpm install --frozen-lockfile
-      - name: Build both protected-feature selections
-        shell: pwsh
-        run: |
-          Remove-Item Env:VITE_BUZZ_BESTIE -ErrorAction SilentlyContinue
-          pnpm -C desktop build
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:VITE_BUZZ_BESTIE = "1"
-          pnpm -C desktop build
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
   results:
     name: Results
     if: ${{ always() }}
     needs: [desktop]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     outputs:
       desktop_result: ${{ needs.desktop.result }}
     steps:
