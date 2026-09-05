@@ -2,6 +2,14 @@ name: CI / Relay and PostgreSQL
 on:
   workflow_call:
     inputs:
+      chalk_on:
+        description: "racecar: instrumented arm switch, passed down by the caller"
+        type: string
+        default: "false"
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
       rust:
         required: true
         type: boolean
@@ -27,9 +35,16 @@ on:
         value: ${{ jobs.results.outputs.postgres_tests_result }}
 
 env:
+  # The one variable that separates the arms: on baseline, action-checkout
+  # skips its Set up Chalk step entirely.
+  CHALK_ON: ${{ inputs.chalk_on }}
   CARGO_TERM_COLOR: always
   BUZZ_TEST_POSTGRES_PASSWORD: buzz_dev
   PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
+
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
   desktop-e2e-relay:
@@ -39,11 +54,24 @@ jobs:
     if: inputs.lane == 'artifacts' && (github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust)
     permissions:
       contents: read
+      id-token: write
     env:
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_RW_MODE: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.number == 5224)) && 'READ_WRITE' || 'READ_ONLY' }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       # Reuse the relay binaries and backend test archive when none of their
       # inputs changed (desktop-only PRs hit this every time). The key covers
@@ -138,6 +166,7 @@ jobs:
     if: inputs.lane == 'postgres' && (github.event_name == 'push' || inputs.rust)
     permissions:
       contents: read
+      id-token: write
     services:
       postgres:
         image: postgres:16
@@ -172,7 +201,19 @@ jobs:
       PGSCHEMA_PLAN_USER: buzz
       PGSCHEMA_PLAN_PASSWORD: buzz_dev
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Tune disposable PostgreSQL
         env:
@@ -217,8 +258,21 @@ jobs:
         shard: [1, 2]
     permissions:
       contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Start integration services
         run: |
@@ -390,6 +444,7 @@ jobs:
     if: always() && inputs.lane == 'required' && (github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust)
     permissions:
       contents: read
+      id-token: write
     steps:
       - name: Check integration shards
         run: |
@@ -406,8 +461,21 @@ jobs:
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust)
     permissions:
       contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Install cargo-nextest
         uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
@@ -547,8 +615,21 @@ jobs:
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust)
     permissions:
       contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
@@ -601,7 +682,9 @@ jobs:
     needs: [desktop-e2e-relay, postgres-tests, desktop-e2e-integration, backend-integration, relay-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     outputs:
       desktop_e2e_relay_result: ${{ needs.desktop-e2e-relay.result }}
       desktop_e2e_integration_result: ${{ needs.desktop-e2e-integration.result }}
