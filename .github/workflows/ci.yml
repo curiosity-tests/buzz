@@ -1,17 +1,41 @@
 name: CI
 on:
+  workflow_dispatch:
+    inputs:
+      leg:
+        description: "baseline (uninstrumented) or instrumented (under chalk/curiosity)"
+        type: choice
+        options: [instrumented, baseline]
+        default: instrumented
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
+      racecar_run:
+        description: "racecar correlation token, echoed into the run name"
+        type: string
+        default: ""
   push:
     branches: [main, release]
   pull_request:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}-${{ inputs.leg || 'push' }}-${{ inputs.racecar_run }}
+  cancel-in-progress: false
 
 env:
+  # The one variable that separates the arms: on baseline, action-checkout
+  # skips its Set up Chalk step entirely.
+  CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
   CARGO_TERM_COLOR: always
   BUZZ_TEST_POSTGRES_PASSWORD: buzz_dev
   PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
+
+permissions:
+  contents: read
+  id-token: write
+
+run-name: "CI ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
 
 jobs:
   changes:
@@ -21,16 +45,28 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      id-token: write
     outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      desktop: ${{ steps.filter.outputs.desktop }}
-      desktop-rust: ${{ steps.filter.outputs.desktop-rust }}
-      web: ${{ steps.filter.outputs.web }}
-      mobile: ${{ steps.filter.outputs.mobile }}
+      rust: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.rust }}
+      desktop: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.desktop }}
+      desktop-rust: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.desktop-rust }}
+      web: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.web }}
+      mobile: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.mobile }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
         with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
           fetch-depth: 2
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
@@ -123,8 +159,21 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - name: Check for dead API token references in client code
         run: |
           # Fail if dead API token patterns reappear in desktop, mobile, docs, or config.
@@ -144,6 +193,8 @@ jobs:
     if: github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true'
     uses: ./.github/workflows/_ci-rust.yml
     with:
+      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
       lane: required
@@ -154,6 +205,8 @@ jobs:
     if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     uses: ./.github/workflows/_ci-rust.yml
     with:
+      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
       lane: cross-compile
@@ -164,6 +217,8 @@ jobs:
     if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
     uses: ./.github/workflows/_ci-desktop.yml
     with:
+      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop: ${{ needs.changes.outputs.desktop == 'true' }}
       desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
@@ -174,6 +229,8 @@ jobs:
     if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
     uses: ./.github/workflows/_ci-relay.yml
     with:
+      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop: ${{ needs.changes.outputs.desktop == 'true' }}
       desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
@@ -185,6 +242,8 @@ jobs:
     if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     uses: ./.github/workflows/_ci-relay.yml
     with:
+      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop: ${{ needs.changes.outputs.desktop == 'true' }}
       desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
@@ -196,6 +255,8 @@ jobs:
     if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
     uses: ./.github/workflows/_ci-desktop-macos.yml
     with:
+      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop: ${{ needs.changes.outputs.desktop == 'true' }}
       desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
@@ -206,6 +267,8 @@ jobs:
     if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
     uses: ./.github/workflows/_ci-relay.yml
     with:
+      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop: ${{ needs.changes.outputs.desktop == 'true' }}
       desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
@@ -217,6 +280,8 @@ jobs:
     if: github.event_name == 'push' || needs.changes.outputs.web == 'true' || needs.changes.outputs.mobile == 'true'
     uses: ./.github/workflows/_ci-clients.yml
     with:
+      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       web: ${{ needs.changes.outputs.web == 'true' }}
       mobile: ${{ needs.changes.outputs.mobile == 'true' }}
       lane: required
@@ -227,6 +292,8 @@ jobs:
     if: needs.changes.outputs.mobile == 'true'
     uses: ./.github/workflows/_ci-clients.yml
     with:
+      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       web: ${{ needs.changes.outputs.web == 'true' }}
       mobile: ${{ needs.changes.outputs.mobile == 'true' }}
       lane: mobile-swift
@@ -237,6 +304,8 @@ jobs:
     if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     uses: ./.github/workflows/_ci-security.yml
     with:
+      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
 
   rust-lint:
@@ -245,7 +314,9 @@ jobs:
     needs: [changes, rust]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check Rust Lint result
         env:
@@ -258,7 +329,9 @@ jobs:
     needs: [changes, rust]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check Unit Tests result
         env:
@@ -271,7 +344,9 @@ jobs:
     needs: [changes, rust]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check Windows Rust result
         env:
@@ -284,7 +359,9 @@ jobs:
     needs: [changes, desktop-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check Desktop result
         env:
@@ -297,7 +374,9 @@ jobs:
     needs: [changes, desktop-macos-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check Desktop Build (macOS) result
         env:
@@ -310,7 +389,9 @@ jobs:
     needs: [changes, relay-artifacts-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check Desktop E2E Relay result
         env:
@@ -323,7 +404,9 @@ jobs:
     needs: [changes, relay-artifacts-domain, relay-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check Desktop E2E Integration result
         env:
@@ -336,7 +419,9 @@ jobs:
     needs: [changes, relay-artifacts-domain, relay-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check Backend Integration result
         env:
@@ -349,7 +434,9 @@ jobs:
     needs: [changes, relay-artifacts-domain, postgres-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check PostgreSQL Tests result
         env:
@@ -362,7 +449,9 @@ jobs:
     needs: [changes, relay-artifacts-domain, relay-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check Relay E2E result
         env:
@@ -375,7 +464,9 @@ jobs:
     needs: [changes, clients]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check Web result
         env:
@@ -388,7 +479,9 @@ jobs:
     needs: [changes, clients]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check Mobile result
         env:
@@ -401,7 +494,9 @@ jobs:
     needs: [changes, security-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check Security result
         env:
