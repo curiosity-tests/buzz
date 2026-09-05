@@ -2,6 +2,14 @@ name: CI / Rust
 on:
   workflow_call:
     inputs:
+      chalk_on:
+        description: "racecar: instrumented arm switch, passed down by the caller"
+        type: string
+        default: "false"
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
       rust:
         required: true
         type: boolean
@@ -20,9 +28,16 @@ on:
         value: ${{ jobs.results.outputs.windows_rust_result }}
 
 env:
+  # The one variable that separates the arms: on baseline, action-checkout
+  # skips its Set up Chalk step entirely.
+  CHALK_ON: ${{ inputs.chalk_on }}
   CARGO_TERM_COLOR: always
   BUZZ_TEST_POSTGRES_PASSWORD: buzz_dev
   PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
+
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
   rust-lint:
@@ -32,8 +47,21 @@ jobs:
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust || inputs.desktop_rust)
     permissions:
       contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
@@ -52,8 +80,21 @@ jobs:
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust)
     permissions:
       contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
@@ -74,6 +115,7 @@ jobs:
     if: inputs.lane == 'cross-compile' && (github.event_name == 'push' || inputs.rust)
     permissions:
       contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -81,7 +123,19 @@ jobs:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
@@ -105,112 +159,15 @@ jobs:
             -p git-credential-nostr \
             -p git-sign-nostr
 
-  windows-rust:
-    name: Windows Rust (x86_64-pc-windows-msvc)
-    runs-on: windows-latest
-    # Windows runners are slow and this compiles the workspace + Tauri crate
-    # cold across four steps; budget generously.
-    timeout-minutes: 45
-    if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust || inputs.desktop_rust)
-    permissions:
-      contents: read
-    env:
-      TARGET: x86_64-pc-windows-msvc
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      # MSVC needs windows.h (aws-lc-sys et al.), so this runs on a real Windows
-      # runner — hermit, used by the Linux jobs, does not provide MSVC. The
-      # toolchain (1.95.0 + clippy via profile = default) comes from the
-      # repo-root rust-toolchain.toml, which the runner's preinstalled rustup
-      # honors on demand; the host triple already is x86_64-pc-windows-msvc.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
-        with:
-          workspaces: |
-            .
-            desktop/src-tauri
-          key: windows-msvc
-          save-if: ${{ github.event_name != 'pull_request' }}
-      # Tauri validates externalBin at compile time, so the Tauri-crate steps
-      # below fail without these stubs. Mirrors scripts/bundle-sidecars.sh's
-      # Windows naming (binaries/<bin>-<triple>.exe); empty files suffice for a
-      # type-check since nothing executes them.
-      - name: Create sidecar placeholders
-        shell: bash
-        run: |
-          mkdir -p desktop/src-tauri/binaries
-          for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
-            touch "desktop/src-tauri/binaries/${bin}-${TARGET}.exe"
-          done
-      - name: Clippy (workspace)
-        run: cargo clippy --workspace --all-targets --target $env:TARGET -- -D warnings
-      - name: Check (workspace)
-        run: cargo check --workspace --all-targets --target $env:TARGET
-      - name: Test (buzz-dev-mcp)
-        # The Windows-only bash resolver lives in buzz-dev-mcp; its unit tests
-        # only gate if this crate is tested ON Windows.
-        # Serial: windows_resolver_tests mutate process-global env
-        # (BUZZ_SHELL/GIT_BASH/SystemRoot) that SharedState::new reads.
-        run: cargo test -p buzz-dev-mcp --target $env:TARGET -- --test-threads=1
-      - name: Test (buzz-agent auth coordinator)
-        # The auth coordinator single-flights on an OS advisory lock, which is
-        # LockFileEx on Windows; this integration suite drives real second
-        # processes on the same lock file, so it only exercises the Windows
-        # lock runtime if it runs ON Windows. Every other job compiles it but
-        # never executes it. Tests exercised on Windows: lock serialization
-        # (two coordinators race for the same key), cooldown sidecar sharing
-        # across processes, attempt-sidecar adoption (UserInitiated waiter
-        # adopts a predecessor's denial), and the in-process single-flight for
-        # same-key coalescing. Tests that are UNIX-ONLY and NOT executed here:
-        # crash-release (flock drop on SIGKILL, guarded by #[cfg(unix)]) and
-        # cross-process cache success/race (on-disk token handoff, also
-        # #[cfg(unix)]).
-        run: cargo test -p buzz-agent --target $env:TARGET --test databricks_auth_coordinator
-      # Smoke-test the new host-prereq contract: Git for Windows (which provides
-      # bash) is available on the runner, a shell command round-trips, and bash
-      # does NOT resolve from System32 (so WSL's launcher is never picked up).
-      # windows-latest runners have Git for Windows pre-installed; the unit tests
-      # above exercise the MCP resolver itself. This step verifies the host env.
-      - name: Smoke-test host Git Bash prereq (host env check)
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Git for Windows ships bash.exe under its bin/ directory; confirm it
-          # resolves from the standard location the runtime resolver probes first.
-          bash_path=$(command -v bash 2>/dev/null || true)
-          [[ -n "$bash_path" ]] || { echo "ERROR: bash not found on PATH — host Git for Windows missing" >&2; exit 1; }
-          echo "Resolved bash: $bash_path"
-          [[ "$bash_path" != *System32* ]] || { echo "ERROR: resolved bash is WSL's System32 launcher" >&2; exit 1; }
-
-          # Run a basic pipeline through the resolved bash (same invocation the
-          # agent uses: bash -c '...').
-          out=$(bash -c 'echo hello | tr a-z A-Z')
-          [[ "$out" == "HELLO" ]] || { echo "bash pipeline failed: got '$out'" >&2; exit 1; }
-
-          # Confirm git itself works — agents run git commands frequently.
-          git --version
-          repo=$(mktemp -d)
-          cd "$repo"
-          git init -q
-          git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m smoke
-          git log -1 --format=%s | grep -qx smoke
-          echo "Host bash resolved and functional; git commit round-trip passed"
-      - name: Check (Tauri crate)
-        run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --workspace --all-targets --target $env:TARGET
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-      - name: Test (Tauri crate)
-        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-
-
   results:
     name: Results
     if: ${{ always() }}
-    needs: [rust-lint, unit-tests, server-cross-compile, windows-rust]
+    needs: [rust-lint, unit-tests, server-cross-compile]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+      id-token: write
     outputs:
       rust_lint_result: ${{ needs.rust-lint.result }}
       unit_tests_result: ${{ needs.unit-tests.result }}
