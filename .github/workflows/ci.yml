@@ -20,13 +20,13 @@ on:
   pull_request:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}-${{ inputs.leg || 'push' }}-${{ inputs.racecar_run }}
+  group: ci-${{ github.workflow }}-${{ 'push' == 'pull_request' && github.ref || github.sha }}-${{ inputs.leg || 'push' }}-${{ inputs.racecar_run }}
   cancel-in-progress: false
 
 env:
   # The one variable that separates the arms: on baseline, action-checkout
   # skips its Set up Chalk step entirely.
-  CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+  CHALK_ON: ${{ inputs.leg == 'instrumented' }}
   CARGO_TERM_COLOR: always
   BUZZ_TEST_POSTGRES_PASSWORD: buzz_dev
   PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
@@ -47,11 +47,11 @@ jobs:
       pull-requests: read
       id-token: write
     outputs:
-      rust: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.rust }}
-      desktop: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.desktop }}
-      desktop-rust: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.desktop-rust }}
-      web: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.web }}
-      mobile: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.mobile }}
+      rust: ${{ 'push' == 'workflow_dispatch' && 'true' || steps.filter.outputs.rust }}
+      desktop: ${{ 'push' == 'workflow_dispatch' && 'true' || steps.filter.outputs.desktop }}
+      desktop-rust: ${{ 'push' == 'workflow_dispatch' && 'true' || steps.filter.outputs.desktop-rust }}
+      web: ${{ 'push' == 'workflow_dispatch' && 'true' || steps.filter.outputs.web }}
+      mobile: ${{ 'push' == 'workflow_dispatch' && 'true' || steps.filter.outputs.mobile }}
     steps:
       - name: Checkout code
         uses: crashappsec/action-checkout@main
@@ -120,7 +120,7 @@ jobs:
               - '.github/workflows/ci.yml'
               - '.github/workflows/_ci-*.yml'
       - name: Validate PostgreSQL test discovery
-        if: github.event_name == 'push' || steps.filter.outputs.rust == 'true'
+        if: ${{ 'push' == 'push' || steps.filter.outputs.rust == 'true' }}
         run: |
           scripts/test-postgres-test-discovery.sh
           scripts/test-postgres-test-wrapper.sh
@@ -190,10 +190,10 @@ jobs:
   rust:
     name: Rust
     needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true'
+    if: ${{ 'push' == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true' }}
     uses: ./.github/workflows/_ci-rust.yml
     with:
-      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      chalk_on: ${{ inputs.leg == 'instrumented' && 'true' || 'false' }}
       profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
@@ -202,10 +202,10 @@ jobs:
   rust-cross-compile-domain:
     name: Rust Cross-Compile
     needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
+    if: ${{ 'push' == 'push' || needs.changes.outputs.rust == 'true' }}
     uses: ./.github/workflows/_ci-rust.yml
     with:
-      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      chalk_on: ${{ inputs.leg == 'instrumented' && 'true' || 'false' }}
       profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
@@ -214,10 +214,10 @@ jobs:
   desktop-domain:
     name: Desktop Domain
     needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
+    if: ${{ 'push' == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true' }}
     uses: ./.github/workflows/_ci-desktop.yml
     with:
-      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      chalk_on: ${{ inputs.leg == 'instrumented' && 'true' || 'false' }}
       profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop: ${{ needs.changes.outputs.desktop == 'true' }}
@@ -226,10 +226,10 @@ jobs:
   relay-artifacts-domain:
     name: Relay Artifact Producer
     needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
+    if: ${{ 'push' == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true' }}
     uses: ./.github/workflows/_ci-relay.yml
     with:
-      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      chalk_on: ${{ inputs.leg == 'instrumented' && 'true' || 'false' }}
       profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop: ${{ needs.changes.outputs.desktop == 'true' }}
@@ -239,10 +239,10 @@ jobs:
   postgres-domain:
     name: PostgreSQL Domain
     needs: [changes, relay-artifacts-domain]
-    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
+    if: ${{ 'push' == 'push' || needs.changes.outputs.rust == 'true' }}
     uses: ./.github/workflows/_ci-relay.yml
     with:
-      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      chalk_on: ${{ inputs.leg == 'instrumented' && 'true' || 'false' }}
       profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop: ${{ needs.changes.outputs.desktop == 'true' }}
@@ -252,10 +252,10 @@ jobs:
   desktop-macos-domain:
     name: Desktop macOS Domain
     needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
+    if: ${{ 'push' == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true' }}
     uses: ./.github/workflows/_ci-desktop-macos.yml
     with:
-      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      chalk_on: ${{ inputs.leg == 'instrumented' && 'true' || 'false' }}
       profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop: ${{ needs.changes.outputs.desktop == 'true' }}
@@ -264,10 +264,10 @@ jobs:
   relay-domain:
     name: Relay and PostgreSQL
     needs: [changes, relay-artifacts-domain]
-    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
+    if: ${{ 'push' == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true' }}
     uses: ./.github/workflows/_ci-relay.yml
     with:
-      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      chalk_on: ${{ inputs.leg == 'instrumented' && 'true' || 'false' }}
       profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop: ${{ needs.changes.outputs.desktop == 'true' }}
@@ -277,10 +277,10 @@ jobs:
   clients:
     name: Clients
     needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.web == 'true' || needs.changes.outputs.mobile == 'true'
+    if: ${{ 'push' == 'push' || needs.changes.outputs.web == 'true' || needs.changes.outputs.mobile == 'true' }}
     uses: ./.github/workflows/_ci-clients.yml
     with:
-      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      chalk_on: ${{ inputs.leg == 'instrumented' && 'true' || 'false' }}
       profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       web: ${{ needs.changes.outputs.web == 'true' }}
       mobile: ${{ needs.changes.outputs.mobile == 'true' }}
@@ -292,7 +292,7 @@ jobs:
     if: needs.changes.outputs.mobile == 'true'
     uses: ./.github/workflows/_ci-clients.yml
     with:
-      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      chalk_on: ${{ inputs.leg == 'instrumented' && 'true' || 'false' }}
       profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       web: ${{ needs.changes.outputs.web == 'true' }}
       mobile: ${{ needs.changes.outputs.mobile == 'true' }}
@@ -301,16 +301,16 @@ jobs:
   security-domain:
     name: Security Domain
     needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
+    if: ${{ 'push' == 'push' || needs.changes.outputs.rust == 'true' }}
     uses: ./.github/workflows/_ci-security.yml
     with:
-      chalk_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline') && 'true' || 'false' }}
+      chalk_on: ${{ inputs.leg == 'instrumented' && 'true' || 'false' }}
       profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       rust: ${{ needs.changes.outputs.rust == 'true' }}
 
   rust-lint:
     name: Rust Lint
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true')
+    if: always() && needs.changes.result == 'success' && ('push' == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true')
     needs: [changes, rust]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -325,7 +325,7 @@ jobs:
 
   unit-tests:
     name: Unit Tests
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    if: always() && needs.changes.result == 'success' && ('push' == 'push' || needs.changes.outputs.rust == 'true')
     needs: [changes, rust]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -340,7 +340,7 @@ jobs:
 
   windows-rust:
     name: Windows Rust (x86_64-pc-windows-msvc)
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true')
+    if: always() && needs.changes.result == 'success' && ('push' == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true')
     needs: [changes, rust]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -355,7 +355,7 @@ jobs:
 
   desktop:
     name: Desktop
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
+    if: always() && needs.changes.result == 'success' && ('push' == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
     needs: [changes, desktop-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -370,7 +370,7 @@ jobs:
 
   desktop-build-macos:
     name: Desktop Build (macOS)
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
+    if: always() && needs.changes.result == 'success' && ('push' == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
     needs: [changes, desktop-macos-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -385,7 +385,7 @@ jobs:
 
   desktop-e2e-relay:
     name: Desktop E2E Relay
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
+    if: always() && needs.changes.result == 'success' && ('push' == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
     needs: [changes, relay-artifacts-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -400,7 +400,7 @@ jobs:
 
   desktop-e2e-integration:
     name: Desktop E2E Integration
-    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
+    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && ('push' == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
     needs: [changes, relay-artifacts-domain, relay-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -415,7 +415,7 @@ jobs:
 
   backend-integration:
     name: Backend Integration (relay e2e)
-    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && ('push' == 'push' || needs.changes.outputs.rust == 'true')
     needs: [changes, relay-artifacts-domain, relay-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -430,7 +430,7 @@ jobs:
 
   postgres-tests:
     name: PostgreSQL Tests
-    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && ('push' == 'push' || needs.changes.outputs.rust == 'true')
     needs: [changes, relay-artifacts-domain, postgres-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -445,7 +445,7 @@ jobs:
 
   relay-e2e:
     name: Relay E2E
-    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && ('push' == 'push' || needs.changes.outputs.rust == 'true')
     needs: [changes, relay-artifacts-domain, relay-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -460,7 +460,7 @@ jobs:
 
   web:
     name: Web
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.web == 'true')
+    if: always() && needs.changes.result == 'success' && ('push' == 'push' || needs.changes.outputs.web == 'true')
     needs: [changes, clients]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -475,7 +475,7 @@ jobs:
 
   mobile:
     name: Mobile
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.mobile == 'true')
+    if: always() && needs.changes.result == 'success' && ('push' == 'push' || needs.changes.outputs.mobile == 'true')
     needs: [changes, clients]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -490,7 +490,7 @@ jobs:
 
   security:
     name: Security
-    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    if: always() && needs.changes.result == 'success' && ('push' == 'push' || needs.changes.outputs.rust == 'true')
     needs: [changes, security-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
