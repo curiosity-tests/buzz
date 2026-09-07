@@ -47,11 +47,19 @@ jobs:
       pull-requests: read
       id-token: write
     outputs:
-      rust: ${{ 'push' == 'workflow_dispatch' && 'true' || steps.filter.outputs.rust }}
-      desktop: ${{ 'push' == 'workflow_dispatch' && 'true' || steps.filter.outputs.desktop }}
-      desktop-rust: ${{ 'push' == 'workflow_dispatch' && 'true' || steps.filter.outputs.desktop-rust }}
-      web: ${{ 'push' == 'workflow_dispatch' && 'true' || steps.filter.outputs.web }}
-      mobile: ${{ 'push' == 'workflow_dispatch' && 'true' || steps.filter.outputs.mobile }}
+      # Restored: the racecar patch constant-folded github.event_name to 'push', which
+      # made this "a manual dispatch tests everything" selector permanently FALSE while
+      # the _ci-*.yml callees kept the real github.event_name. The two halves then
+      # disagreed: the required-check mirrors below always run (their own guard folded to
+      # a constant TRUE) and assert `= success`, but a callee job whose only remaining
+      # condition was inputs.<flag> skipped, so the mirror asserted on 'skipped'. With a
+      # workflows-only patch commit, dorny/paths-filter sets rust+desktop+mobile but not
+      # web, so the Web required check could not pass.
+      rust: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.rust }}
+      desktop: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.desktop }}
+      desktop-rust: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.desktop-rust }}
+      web: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.web }}
+      mobile: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.mobile }}
     steps:
       - name: Checkout code
         uses: crashappsec/action-checkout@main
