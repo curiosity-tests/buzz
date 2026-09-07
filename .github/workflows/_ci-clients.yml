@@ -154,10 +154,40 @@ jobs:
       - name: Build Android debug APK
         run: just mobile-build-android
 
+  # Restored from upstream: scripts/test-ci-required-context-isolation.sh (run by
+  # ci.yml's `changes` job) greps this file for `inputs.lane == 'mobile-swift'`,
+  # so dropping the job made that contract - and the whole `changes` job - fail.
+  # Body kept identical to upstream; the repository guard keeps the macos-latest
+  # runner off the fork, where iOS/Swift builds are not part of the measurement.
+  mobile-swift:
+    name: Mobile Swift
+    runs-on: macos-latest
+    timeout-minutes: 30
+    if: inputs.lane == 'mobile-swift' && inputs.mobile && github.repository == 'block/buzz'
+    steps:
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Install Flutter dependencies
+        run: cd mobile && flutter pub get
+      - name: Build
+        run: swift build --package-path mobile/ios/BuzzPushKit
+      - name: Build release
+        run: swift build -c release --package-path mobile/ios/BuzzPushKit
+      - name: Test
+        run: swift test --package-path mobile/ios/BuzzPushKit
+      - name: Build complete unsigned iOS release
+        run: cd mobile && flutter build ios --release --no-codesign --no-pub
+
   results:
     name: Results
     if: ${{ always() }}
-    needs: [web, mobile]
+    needs: [web, mobile, mobile-swift]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
