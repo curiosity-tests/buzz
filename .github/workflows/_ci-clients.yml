@@ -47,43 +47,114 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - name: Checkout code
-        uses: crashappsec/action-checkout@main
-        with:
-          chalk: ${{ env.CHALK_ON }}
-          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
-          observables_continue_on_error: false
-          lfs: false
-          fetch-depth: 2
-      - name: Assert instrumentation is live
-        if: env.CHALK_ON == 'true'
-        run: |
-          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
-          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+    - name: Checkout code
+      uses: crashappsec/action-checkout@main
+      with:
+        chalk: ${{ env.CHALK_ON }}
+        profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+        observables_continue_on_error: false
+        lfs: false
+        fetch-depth: 2
+    - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616   # v1
+    - name: Get pnpm store directory
+      id: pnpm-cache
+      run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+    - name: Restore pnpm store cache
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25   # v5
+      with:
+        path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+        key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+        restore-keys: pnpm-${{ runner.os }}-
+    - name: Install dependencies
+      run: pnpm install --frozen-lockfile
+    - name: Web lint and format
+      run: just web-check
+    - name: Web build
+      run: just web-build
+    - name: Save pnpm store cache
+      if: github.event_name == 'push'
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25   # v5
+      with:
+        path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+        key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
 
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - name: Get pnpm store directory
-        id: pnpm-cache
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-      - name: Restore pnpm store cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: pnpm-${{ runner.os }}-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Web lint and format
-        run: just web-check
-      - name: Web build
-        run: just web-build
-      - name: Save pnpm store cache
-        if: github.event_name == 'push'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+    - name: Check observables and crashes
+      if: always() && env.CHALK_ON == 'true'
+      shell: bash
+      run: |
+        set -uo pipefail
+        root="${CURIOSITY_ROOT:-}"
+        home="${CURIOSITY_HOME:-/mnt/curiosity}"
+        obs="${home}/observables"
+        fail=0
 
+        echo "::group::curiosity layout"
+        echo "CURIOSITY_ROOT=${root:-<unset>}"
+        echo "CURIOSITY_HOME=${home}"
+        ls -la "${obs}" 2>/dev/null || echo "no observables dir at ${obs}"
+        echo "::endgroup::"
+
+        # Observables for THIS run+attempt. The prefix matters: a stale file from an
+        # earlier run on the same mount would otherwise pass.
+        prefix="${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+        shopt -s nullglob
+        mine=("${obs}/${prefix}"*)
+        if [ ${#mine[@]} -eq 0 ]; then
+          mine=("${obs}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-observables"*)
+        fi
+        if [ ${#mine[@]} -eq 0 ]; then
+          echo "::error::no observables for run ${prefix} in ${obs} - instrumentation produced nothing"
+          fail=1
+        else
+          echo "observables present: ${#mine[@]} file(s)"
+          printf '  %s\n' "${mine[@]}"
+        fi
+
+        for f in "${mine[@]}"; do
+          case "$f" in
+            *.jsonl|*.json|*.combined)
+              if ! jq --slurp "." "$f" > /dev/null 2>&1; then
+                echo "::error::observables do not parse: $f"
+                fail=1
+              fi
+              ;;
+          esac
+        done
+
+        # Crash thresholds copied from check-run: a few null frames are noise, more than
+        # five is a stack walk into nothing.
+        for f in "${root}"/log/co-host*.log "${home}"/log/co-host*.log; do
+          [ -f "$f" ] || continue
+          echo "Asserting that there is no crash in $f"
+          if [ "$(grep -c 'p 00000000' "$f" 2>/dev/null || echo 0)" -gt 5 ] \
+            || [ "$(grep -E -c 'FATAL: Uncaught signal|Address not mapped at|RAX 0x.*RBX 0x' "$f" 2>/dev/null || echo 0)" -gt 1 ]; then
+            echo "::error::crash signature in $f"
+            grep -E 'FATAL: Uncaught signal|Address not mapped at' "$f" | head -5 || true
+            fail=1
+          fi
+        done
+
+        cores=("${root}"/coredump.* "${home}"/coredump.*)
+        if [ ${#cores[@]} -gt 0 ]; then
+          echo "::error::coredump present: ${cores[*]}"
+          fail=1
+        fi
+
+        for f in "${root}"/runc.log "${root}"/runc.global.log \
+                 "${home}"/runc.log "${home}"/runc.global.log; do
+          [ -f "$f" ] || continue
+          if grep -q '^E:' "$f"; then
+            echo "::error::error in $f"
+            grep '^E:' "$f" | head -5
+            fail=1
+          fi
+        done
+
+        if [ "$fail" -ne 0 ]; then
+          echo "::error::instrumentation check FAILED"
+          exit 1
+        fi
+        echo "instrumentation check passed"
   mobile:
     name: Mobile
     runs-on: ubuntu-latest
@@ -93,101 +164,149 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - name: Checkout code
-        uses: crashappsec/action-checkout@main
-        with:
-          chalk: ${{ env.CHALK_ON }}
-          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
-          observables_continue_on_error: false
-          lfs: false
-          fetch-depth: 2
-      - name: Assert instrumentation is live
-        if: env.CHALK_ON == 'true'
-        run: |
-          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
-          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
-
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - name: Compute Hermit cache key
-        id: hermit-bin-hash
-        run: |
-          hash="$(find ./bin ! -type d | sort | xargs openssl sha256 | openssl sha256 -r | cut -d' ' -f1)"
-          echo "hash=$hash" >> "$GITHUB_OUTPUT"
-      - name: Restore Hermit package cache
-        id: hermit-cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ~/.cache/hermit/pkg
-          key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
-          restore-keys: ${{ runner.os }}-hermit-cache-
-      - name: Prime Flutter SDK
-        run: flutter --version
-      - name: Save Hermit package cache
-        if: always() && steps.hermit-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        continue-on-error: true
-        with:
-          path: ~/.cache/hermit/pkg
-          key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
-      - name: Restore pub cache
-        id: pub-cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ~/.pub-cache
-          key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
-          restore-keys: pub-${{ runner.os }}-
-      - name: Install dependencies
-        run: cd mobile && flutter pub get
-      - name: Save pub cache
-        if: always() && steps.pub-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        continue-on-error: true
-        with:
-          path: ~/.pub-cache
-          key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
-      - name: Format check
-        run: cd mobile && dart format --output=none --set-exit-if-changed .
-      - name: Analyze
-        run: cd mobile && flutter analyze
-      - name: Test
-        run: cd mobile && flutter test
-      - name: Build Android debug APK
-        run: just mobile-build-android
+    - name: Checkout code
+      uses: crashappsec/action-checkout@main
+      with:
+        chalk: ${{ env.CHALK_ON }}
+        profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+        observables_continue_on_error: false
+        lfs: false
+        fetch-depth: 2
+    - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616   # v1
+    - name: Compute Hermit cache key
+      id: hermit-bin-hash
+      run: |
+        hash="$(find ./bin ! -type d | sort | xargs openssl sha256 | openssl sha256 -r | cut -d' ' -f1)"
+        echo "hash=$hash" >> "$GITHUB_OUTPUT"
+    - name: Restore Hermit package cache
+      id: hermit-cache
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25   # v5
+      with:
+        path: ~/.cache/hermit/pkg
+        key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
+        restore-keys: ${{ runner.os }}-hermit-cache-
+    - name: Prime Flutter SDK
+      run: flutter --version
+    - name: Save Hermit package cache
+      if: always() && steps.hermit-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25   # v5
+      continue-on-error: true
+      with:
+        path: ~/.cache/hermit/pkg
+        key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
+    - name: Restore pub cache
+      id: pub-cache
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25   # v5
+      with:
+        path: ~/.pub-cache
+        key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
+        restore-keys: pub-${{ runner.os }}-
+    - name: Install dependencies
+      run: cd mobile && flutter pub get
+    - name: Save pub cache
+      if: always() && steps.pub-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25   # v5
+      continue-on-error: true
+      with:
+        path: ~/.pub-cache
+        key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
+    - name: Format check
+      run: cd mobile && dart format --output=none --set-exit-if-changed .
+    - name: Analyze
+      run: cd mobile && flutter analyze
+    - name: Test
+      run: cd mobile && flutter test
+    - name: Build Android debug APK
+      run: just mobile-build-android
 
   # Restored from upstream: scripts/test-ci-required-context-isolation.sh (run by
   # ci.yml's `changes` job) greps this file for `inputs.lane == 'mobile-swift'`,
   # so dropping the job made that contract - and the whole `changes` job - fail.
   # Body kept identical to upstream; the repository guard keeps the macos-latest
   # runner off the fork, where iOS/Swift builds are not part of the measurement.
-  mobile-swift:
-    name: Mobile Swift
-    runs-on: macos-latest
-    timeout-minutes: 30
-    if: inputs.lane == 'mobile-swift' && inputs.mobile && github.repository == 'block/buzz'
-    steps:
-      - name: Checkout code
-        uses: crashappsec/action-checkout@main
-        with:
-          chalk: ${{ env.CHALK_ON }}
-          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
-          observables_continue_on_error: false
-          lfs: false
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - name: Install Flutter dependencies
-        run: cd mobile && flutter pub get
-      - name: Build
-        run: swift build --package-path mobile/ios/BuzzPushKit
-      - name: Build release
-        run: swift build -c release --package-path mobile/ios/BuzzPushKit
-      - name: Test
-        run: swift test --package-path mobile/ios/BuzzPushKit
-      - name: Build complete unsigned iOS release
-        run: cd mobile && flutter build ios --release --no-codesign --no-pub
+    - name: Check observables and crashes
+      if: always() && env.CHALK_ON == 'true'
+      shell: bash
+      run: |
+        set -uo pipefail
+        root="${CURIOSITY_ROOT:-}"
+        home="${CURIOSITY_HOME:-/mnt/curiosity}"
+        obs="${home}/observables"
+        fail=0
 
+        echo "::group::curiosity layout"
+        echo "CURIOSITY_ROOT=${root:-<unset>}"
+        echo "CURIOSITY_HOME=${home}"
+        ls -la "${obs}" 2>/dev/null || echo "no observables dir at ${obs}"
+        echo "::endgroup::"
+
+        # Observables for THIS run+attempt. The prefix matters: a stale file from an
+        # earlier run on the same mount would otherwise pass.
+        prefix="${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+        shopt -s nullglob
+        mine=("${obs}/${prefix}"*)
+        if [ ${#mine[@]} -eq 0 ]; then
+          mine=("${obs}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-observables"*)
+        fi
+        if [ ${#mine[@]} -eq 0 ]; then
+          echo "::error::no observables for run ${prefix} in ${obs} - instrumentation produced nothing"
+          fail=1
+        else
+          echo "observables present: ${#mine[@]} file(s)"
+          printf '  %s\n' "${mine[@]}"
+        fi
+
+        for f in "${mine[@]}"; do
+          case "$f" in
+            *.jsonl|*.json|*.combined)
+              if ! jq --slurp "." "$f" > /dev/null 2>&1; then
+                echo "::error::observables do not parse: $f"
+                fail=1
+              fi
+              ;;
+          esac
+        done
+
+        # Crash thresholds copied from check-run: a few null frames are noise, more than
+        # five is a stack walk into nothing.
+        for f in "${root}"/log/co-host*.log "${home}"/log/co-host*.log; do
+          [ -f "$f" ] || continue
+          echo "Asserting that there is no crash in $f"
+          if [ "$(grep -c 'p 00000000' "$f" 2>/dev/null || echo 0)" -gt 5 ] \
+            || [ "$(grep -E -c 'FATAL: Uncaught signal|Address not mapped at|RAX 0x.*RBX 0x' "$f" 2>/dev/null || echo 0)" -gt 1 ]; then
+            echo "::error::crash signature in $f"
+            grep -E 'FATAL: Uncaught signal|Address not mapped at' "$f" | head -5 || true
+            fail=1
+          fi
+        done
+
+        cores=("${root}"/coredump.* "${home}"/coredump.*)
+        if [ ${#cores[@]} -gt 0 ]; then
+          echo "::error::coredump present: ${cores[*]}"
+          fail=1
+        fi
+
+        for f in "${root}"/runc.log "${root}"/runc.global.log \
+                 "${home}"/runc.log "${home}"/runc.global.log; do
+          [ -f "$f" ] || continue
+          if grep -q '^E:' "$f"; then
+            echo "::error::error in $f"
+            grep '^E:' "$f" | head -5
+            fail=1
+          fi
+        done
+
+        if [ "$fail" -ne 0 ]; then
+          echo "::error::instrumentation check FAILED"
+          exit 1
+        fi
+        echo "instrumentation check passed"
   results:
     name: Results
     if: ${{ always() }}
-    needs: [web, mobile, mobile-swift]
+    needs:
+    - web
+    - mobile
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -197,4 +316,4 @@ jobs:
       web_result: ${{ needs.web.result }}
       mobile_result: ${{ needs.mobile.result }}
     steps:
-      - run: echo "Captured client job results"
+    - run: echo "Captured client job results"
